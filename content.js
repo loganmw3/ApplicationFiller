@@ -142,35 +142,221 @@ function dataUrlToFile(dataUrl, filename, mimeType) {
 }
 
 function tryUploadResume(resume) {
-  if (!resume?.dataUrl || !resume?.meta?.name) return;
+  if (!resume?.dataUrl || !resume?.meta?.name) return { skipped: "missing_resume_data" };
 
-  const fileInputs = [
-    ...document.querySelectorAll('input[type="file"]'),
-  ].filter((el) => !el.disabled && el.offsetParent !== null);
+  try {
+    const fileInputs = [
+      ...document.querySelectorAll('input[type="file"]'),
+    ].filter((el) => !el.disabled && el.offsetParent !== null);
 
-  if (fileInputs.length === 0) return;
+    if (fileInputs.length === 0) return { skipped: "no_file_input" };
 
-  // Prefer inputs that look like resume/cv uploads
-  const ranked = fileInputs
-    .map((el) => ({ el, score: looksLikeResumeUpload(el) ? 10 : 0 }))
-    .sort((a, b) => b.score - a.score);
+    // Prefer inputs that look like resume/cv uploads
+    const ranked = fileInputs
+      .map((el) => ({ el, score: looksLikeResumeUpload(el) ? 10 : 0 }))
+      .sort((a, b) => b.score - a.score);
 
-  const best = ranked[0].el;
+    const best = ranked[0].el;
 
-  const file = dataUrlToFile(
-    resume.dataUrl,
-    resume.meta.name,
-    resume.meta.type,
-  );
-  if (!file) return;
+    const file = dataUrlToFile(
+      resume.dataUrl,
+      resume.meta.name,
+      resume.meta.type,
+    );
+    if (!file) return { skipped: "bad_file_data" };
 
-  // Some sites block programmatic assignment; this works on many standard forms.
-  const dt = new DataTransfer();
-  dt.items.add(file);
-  best.files = dt.files;
+    // Some sites block programmatic assignment; this works on many standard forms.
+    const dt = new DataTransfer();
+    dt.items.add(file);
+    best.files = dt.files;
 
-  best.dispatchEvent(new Event("input", { bubbles: true }));
-  best.dispatchEvent(new Event("change", { bubbles: true }));
+    best.dispatchEvent(new Event("input", { bubbles: true }));
+    best.dispatchEvent(new Event("change", { bubbles: true }));
+    return { uploaded: true };
+  } catch (error) {
+    // Resume upload should never block field autofill.
+    console.warn("Resume upload skipped:", error);
+    return { skipped: "upload_blocked" };
+  }
+}
+
+function textScore(haystack, needles) {
+  let score = 0;
+  const h = normalize(haystack);
+  for (const n of needles) {
+    const needle = normalize(n);
+    if (!needle) continue;
+    if (h === needle) score += 10;
+    else if (h.includes(needle)) score += 4;
+  }
+  return score;
+}
+
+function getChoiceOptionText(el) {
+  const label = getLabelText(el);
+  const value = normalize(el.value || "");
+  const aria = normalize(el.getAttribute("aria-label") || "");
+  return normalize(`${label} ${value} ${aria}`);
+}
+
+function getChoiceQuestionText(el) {
+  const bits = [
+    el.name || "",
+    el.id || "",
+    el.getAttribute("aria-label") || "",
+    el.getAttribute("data-qa") || "",
+  ];
+
+  const fieldset = el.closest("fieldset");
+  if (fieldset) {
+    bits.push(fieldset.getAttribute("aria-label") || "");
+    const legend = fieldset.querySelector("legend");
+    if (legend) bits.push(legend.textContent || "");
+  }
+
+  const group = el.closest('[role="group"],[role="radiogroup"]');
+  if (group) bits.push(group.getAttribute("aria-label") || "");
+
+  const container = el.closest("fieldset, section, form, div");
+  if (container) {
+    const heading = container.querySelector("h1,h2,h3,h4,h5,h6");
+    if (heading) bits.push(heading.textContent || "");
+  }
+
+  return normalize(bits.join(" "));
+}
+
+function setChoiceChecked(el) {
+  if (el.checked) return;
+  el.click();
+  el.dispatchEvent(new Event("input", { bubbles: true }));
+  el.dispatchEvent(new Event("change", { bubbles: true }));
+}
+
+function isChoiceInteractable(el) {
+  if (el.disabled) return false;
+  if (el.offsetParent !== null) return true;
+
+  const wrappedLabel = el.closest("label");
+  if (wrappedLabel && wrappedLabel.offsetParent !== null) return true;
+
+  if (el.id) {
+    const forLabel = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+    if (forLabel && forLabel.offsetParent !== null) return true;
+  }
+  return false;
+}
+
+function fillChoiceFields(profile) {
+  const controls = [
+    ...document.querySelectorAll('input[type="radio"], input[type="checkbox"]'),
+  ].filter((el) => isChoiceInteractable(el));
+
+  const choiceConfigs = [
+    {
+      key: "gender",
+      questionKeys: ["gender", "sex", "gender identity"],
+      options: {
+        male: ["male"],
+        female: ["female"],
+        "non-binary": ["non-binary", "nonbinary", "non binary"],
+        "prefer not to say": ["prefer not", "decline", "not to answer"],
+      },
+    },
+    {
+      key: "raceEthnicity",
+      questionKeys: ["race", "ethnicity", "race/ethnicity", "self-identify"],
+      options: {
+        white: ["white"],
+        "black or african american": ["black or african american", "african american", "black"],
+        "hispanic or latino": ["hispanic or latino", "hispanic", "latino"],
+        asian: ["asian"],
+        "american indian or alaska native": ["american indian", "alaska native"],
+        "native hawaiian or other pacific islander": ["native hawaiian", "pacific islander"],
+        "two or more races": ["2 or more races", "two or more races", "multiracial"],
+        "prefer not to say": ["prefer not", "decline", "decline to answer"],
+      },
+    },
+    {
+      key: "disabilityStatus",
+      questionKeys: ["disability", "disabled", "have a disability"],
+      options: {
+        yes: ["yes"],
+        no: ["no"],
+        "prefer not to say": ["prefer not", "decline"],
+      },
+    },
+    {
+      key: "veteranStatus",
+      questionKeys: ["veteran", "protected veteran", "military status"],
+      options: {
+        yes: ["yes"],
+        no: ["no"],
+        "prefer not to say": ["prefer not", "decline"],
+      },
+    },
+    {
+      key: "usCitizen",
+      questionKeys: ["citizen", "citizenship", "u.s. citizen", "us citizen"],
+      options: { yes: ["yes"], no: ["no"] },
+    },
+    {
+      key: "workAuthorization",
+      questionKeys: ["authorized to work", "work authorization", "eligible to work"],
+      options: { yes: ["yes"], no: ["no"] },
+    },
+    {
+      key: "requireSponsorship",
+      questionKeys: ["sponsorship", "visa sponsorship", "require sponsorship"],
+      options: { yes: ["yes"], no: ["no"] },
+    },
+    {
+      key: "willingToRelocate",
+      questionKeys: ["relocate", "relocation", "willing to relocate"],
+      options: { yes: ["yes"], no: ["no"] },
+    },
+    {
+      key: "willingToTravel",
+      questionKeys: ["travel", "willing to travel", "travel requirement"],
+      options: { yes: ["yes"], no: ["no"] },
+    },
+  ];
+
+  for (const cfg of choiceConfigs) {
+    const raw = profile?.[cfg.key];
+    if (!raw) continue;
+    const desired = normalize(raw);
+
+    let desiredAliases = null;
+    for (const [canonical, aliases] of Object.entries(cfg.options)) {
+      const c = normalize(canonical);
+      if (desired === c || aliases.some((a) => desired === normalize(a))) {
+        desiredAliases = [canonical, ...aliases];
+        break;
+      }
+    }
+    if (!desiredAliases) desiredAliases = [raw];
+
+    let best = null;
+    let bestScore = 0;
+    for (const el of controls) {
+      const questionText = getChoiceQuestionText(el);
+      const qScore = textScore(questionText, cfg.questionKeys);
+      if (qScore <= 0) continue;
+
+      const optionText = getChoiceOptionText(el);
+      const oScore = textScore(optionText, desiredAliases);
+      if (oScore <= 0) continue;
+
+      const score = qScore * 100 + oScore;
+      if (score > bestScore) {
+        bestScore = score;
+        best = el;
+      }
+    }
+
+    if (best && bestScore >= 106) setChoiceChecked(best);
+  }
 }
 
 function fillProfile(profile) {
@@ -221,6 +407,24 @@ function fillProfile(profile) {
         "current position",
         "current role",
         "title",
+      ],
+    },
+    {
+      key: "currentCompany",
+      keys: [
+        "current company",
+        "current employer",
+        "employer",
+        "company",
+      ],
+    },
+    {
+      key: "currentLocation",
+      keys: [
+        "current location",
+        "where are you located",
+        "location",
+        "city, state",
       ],
     },
     {
@@ -344,11 +548,13 @@ function fillProfile(profile) {
       if (!current) setNativeValue(bestEl, val);
     }
   }
+
+  fillChoiceFields(profile);
 }
 
 function shouldThrottleAutofill() {
   const KEY = "jobAutofill:lastRunAt";
-  const COOLDOWN_MS = 4000;
+  const COOLDOWN_MS = 1200;
   try {
     const now = Date.now();
     const prev = Number(sessionStorage.getItem(KEY) || 0);
@@ -360,26 +566,41 @@ function shouldThrottleAutofill() {
   return false;
 }
 
-      try {
-        chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-          try {
-            if (msg?.type === "AUTOFILL") {
-              if (shouldThrottleAutofill()) {
-                sendResponse({ success: false, skipped: "throttled" });
-                return true;
-              }
-              fillProfile(msg.profile || {});
-              tryUploadResume(msg.resume || null);
-              sendResponse({ success: true });
-            }
-          } catch (error) {
-            console.error("Autofill error:", error);
-            sendResponse({ success: false, error: error.message });
-          }
-          return true; // Keep message channel open for async response
-        });
-      } catch (error) {
-        console.error("Failed to set up message listener:", error);
+function handleAutofillMessage(msg) {
+  try {
+    if (shouldThrottleAutofill()) return { success: false, skipped: "throttled" };
+    const options = msg?.options || {};
+    const shouldFillProfile = options.fillProfile !== false;
+    const shouldUploadResume = options.uploadResume !== false;
+
+    if (shouldFillProfile) fillProfile(msg?.profile || {});
+    let resumeResult = null;
+    if (shouldUploadResume) {
+      resumeResult = tryUploadResume(msg?.resume || null);
+    }
+    return { success: true, resume: resumeResult };
+  } catch (error) {
+    console.error("Autofill error:", error);
+    return { success: false, error: error.message };
+  }
+}
+
+globalThis.__jobAutofillHandle = handleAutofillMessage;
+
+try {
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    try {
+      if (msg?.type === "AUTOFILL") {
+        sendResponse(handleAutofillMessage(msg));
       }
+    } catch (error) {
+      console.error("Autofill message listener error:", error);
+      sendResponse({ success: false, error: error.message });
+    }
+    return true; // Keep message channel open for async response
+  });
+} catch (error) {
+  console.error("Failed to set up message listener:", error);
+}
 
 })(); // End IIFE
